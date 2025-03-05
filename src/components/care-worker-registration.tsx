@@ -30,6 +30,7 @@ import {
 } from "@/components/ui/select";
 import { Checkbox } from "@/components/ui/checkbox";
 import { UserPlus, Upload, FileText, Calendar } from "lucide-react";
+import { supabase } from "@/lib/supabase";
 
 const formSchema = z.object({
   firstName: z
@@ -221,22 +222,216 @@ export function CareWorkerRegistration() {
     console.log("Form submission started");
     setIsSubmitting(true);
     try {
-      // Mock successful registration without Supabase
       // Generate a unique care worker ID
       const careWorkerId = `CW${Math.floor(1000 + Math.random() * 9000)}`;
 
-      console.log("Would submit with ID:", careWorkerId);
-      console.log("Form data:", data);
+      // First, check if the storage bucket exists, if not create it
+      const { data: buckets } = await supabase.storage.listBuckets();
+      const bucketExists = buckets?.some(
+        (bucket) => bucket.name === "care-worker-documents",
+      );
 
-      // Simulate API delay
-      await new Promise((resolve) => setTimeout(resolve, 1000));
+      if (!bucketExists) {
+        await supabase.storage.createBucket("care-worker-documents", {
+          public: false,
+          allowedMimeTypes: [
+            "image/png",
+            "image/jpeg",
+            "application/pdf",
+            "application/msword",
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+          ],
+          fileSizeLimit: 10485760, // 10MB
+        });
+      }
 
-      // Success
-      console.log("Registration completed successfully");
-      alert("Registration submitted successfully!");
+      // 1. Insert main care worker record
+      const { data: careWorkerData, error: careWorkerError } = await supabase
+        .from("care_workers")
+        .insert({
+          worker_id: careWorkerId,
+          first_name: data.firstName,
+          last_name: data.lastName,
+          email: data.email,
+          phone: data.phone,
+          address: data.address,
+          city: data.city,
+          postcode: data.postcode,
+          role: data.role,
+          nmc_number: data.nmcNumber || null,
+          dbs_number: data.dbsNumber,
+          experience: data.experience,
+        })
+        .select("id")
+        .single();
+
+      if (careWorkerError) {
+        console.error("Error inserting care worker:", careWorkerError);
+        throw careWorkerError;
+      }
+
+      const careWorkerId_db = careWorkerData.id;
+      console.log("Care worker inserted with ID:", careWorkerId_db);
+
+      // 2. Insert availability
+      const { error: availabilityError } = await supabase
+        .from("care_worker_availability")
+        .insert({
+          care_worker_id: careWorkerId_db,
+          weekdays: data.availability.weekdays,
+          weekends: data.availability.weekends,
+          nights: data.availability.nights,
+        });
+
+      if (availabilityError) {
+        console.error("Error inserting availability:", availabilityError);
+        throw availabilityError;
+      }
+
+      // 3. Insert qualifications
+      const { error: qualificationsError } = await supabase
+        .from("care_worker_qualifications")
+        .insert({
+          care_worker_id: careWorkerId_db,
+          medication_trained: data.qualifications.medicationTrained,
+          moving_handling: data.qualifications.movingHandling,
+          first_aid: data.qualifications.firstAid,
+          dementia_care: data.qualifications.dementiaCare,
+          other: data.qualifications.other,
+          other_details: data.qualifications.otherDetails || null,
+        });
+
+      if (qualificationsError) {
+        console.error("Error inserting qualifications:", qualificationsError);
+        throw qualificationsError;
+      }
+
+      // 4. Insert references
+      const referencesData = data.professionalReferences.map((ref) => ({
+        care_worker_id: careWorkerId_db,
+        name: ref.name,
+        position: ref.position,
+        company: ref.company,
+        email: ref.email,
+        phone: ref.phone,
+        relationship: ref.relationship,
+      }));
+
+      const { error: referencesError } = await supabase
+        .from("care_worker_references")
+        .insert(referencesData);
+
+      if (referencesError) {
+        console.error("Error inserting references:", referencesError);
+        throw referencesError;
+      }
+
+      // 5. Insert right to work information
+      const { error: rightToWorkError } = await supabase
+        .from("care_worker_right_to_work")
+        .insert({
+          care_worker_id: careWorkerId_db,
+          method: data.rightToWork.method,
+          passport_number: data.rightToWork.passportNumber || null,
+          nationality: data.rightToWork.nationality || null,
+          visa_status: data.rightToWork.visaStatus || null,
+          visa_expiry_date: data.rightToWork.visaExpiryDate || null,
+          share_code: data.rightToWork.shareCode || null,
+        });
+
+      if (rightToWorkError) {
+        console.error("Error inserting right to work:", rightToWorkError);
+        throw rightToWorkError;
+      }
+
+      // 6. Insert emergency contact
+      const { error: emergencyContactError } = await supabase
+        .from("care_worker_emergency_contacts")
+        .insert({
+          care_worker_id: careWorkerId_db,
+          name: data.emergencyContact.name,
+          relationship: data.emergencyContact.relationship,
+          phone: data.emergencyContact.phone,
+        });
+
+      if (emergencyContactError) {
+        console.error(
+          "Error inserting emergency contact:",
+          emergencyContactError,
+        );
+        throw emergencyContactError;
+      }
+
+      // 7. Handle file uploads if needed
+      if (resumeFile) {
+        try {
+          const { error: resumeUploadError } = await supabase.storage
+            .from("care-worker-documents")
+            .upload(`${careWorkerId_db}/resume/${resumeFile.name}`, resumeFile);
+
+          if (resumeUploadError) {
+            console.error("Error uploading resume:", resumeUploadError);
+            throw resumeUploadError;
+          }
+        } catch (uploadError) {
+          console.error("Resume upload error:", uploadError);
+          // Continue with registration even if file upload fails
+        }
+      }
+
+      if (certificateFiles.length > 0) {
+        for (const file of certificateFiles) {
+          try {
+            const { error: certificateUploadError } = await supabase.storage
+              .from("care-worker-documents")
+              .upload(`${careWorkerId_db}/certificates/${file.name}`, file);
+
+            if (certificateUploadError) {
+              console.error(
+                "Error uploading certificate:",
+                certificateUploadError,
+              );
+              // Continue with other files even if one fails
+            }
+          } catch (uploadError) {
+            console.error("Certificate upload error:", uploadError);
+            // Continue with other files
+          }
+        }
+      }
+
+      if (rightToWorkFile && data.rightToWork.method === "document_upload") {
+        try {
+          const { error: rightToWorkUploadError } = await supabase.storage
+            .from("care-worker-documents")
+            .upload(
+              `${careWorkerId_db}/right-to-work/${rightToWorkFile.name}`,
+              rightToWorkFile,
+            );
+
+          if (rightToWorkUploadError) {
+            console.error(
+              "Error uploading right to work document:",
+              rightToWorkUploadError,
+            );
+            throw rightToWorkUploadError;
+          }
+        } catch (uploadError) {
+          console.error("Right to work document upload error:", uploadError);
+          // Continue with registration even if file upload fails
+        }
+      }
+
+      console.log("Registration completed successfully with ID:", careWorkerId);
+      alert(
+        "Registration submitted successfully! Your worker ID is: " +
+          careWorkerId,
+      );
     } catch (error) {
       console.error("Registration error:", error);
-      alert("Registration failed. Please try again.");
+      alert(
+        "Registration failed. Please try again: " + (error as Error).message,
+      );
     } finally {
       setIsSubmitting(false);
     }
